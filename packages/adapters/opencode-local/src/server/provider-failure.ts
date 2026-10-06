@@ -26,7 +26,10 @@ type EvidenceFacts = {
 };
 
 const HARD_QUOTA_RE =
-  /(?:insufficient[_\s-]?quota|\bquota\s+(?:reached|exceeded|exhausted)\b|billing(?:\s+hard)?\s+limit|out\s+of\s+(?:credits?|quota)|credits?\s+(?:exhausted|depleted)|exceeded\s+your\s+current\s+quota|(?:usage|session|weekly|monthly|daily)\s+(?:limit|cap)\s+(?:reached|exceeded|exhausted)|you(?:'|’)ve\s+hit\s+your\s+(?:(?:usage|session|weekly|monthly|daily)\s+)?(?:limit|cap)|plan\s+(?:limit|quota)\s+(?:reached|exceeded)|spending\s+limit\s+(?:reached|exceeded))/i;
+  /(?:free[_\s-]*usage[_\s-]*limit[_\s-]*error|free\s+usage(?:\s+limit)?\s+(?:reached|exceeded|exhausted)|\bquota\s+(?:reached|exceeded|exhausted)\b|exceeded\s+your\s+current\s+quota|(?:usage|session|weekly|monthly|daily)\s+(?:limit|cap)\s+(?:reached|exceeded|exhausted)|you(?:'|’)ve\s+hit\s+your\s+(?:(?:usage|session|weekly|monthly|daily)\s+)?(?:limit|cap)|plan\s+(?:limit|quota)\s+(?:reached|exceeded))/i;
+
+const NON_RETRYABLE_BILLING_RE =
+  /(?:billing(?:\s+hard)?\s+limit|billing\s+details?|payment\s+required|out\s+of\s+credits?|credits?\s+(?:exhausted|depleted)|spending\s+limit\s+(?:reached|exceeded))/i;
 
 const TRANSIENT_TEXT_RE =
   /(?:rate[-_\s]?limit(?:ed|ing)?|too\s+many\s+requests|resource[_\s-]?exhausted|server\s+overloaded|overloaded_error|temporarily\s+unavailable|service\s+unavailable|bad\s+gateway|gateway\s+time-?out|internal\s+server\s+error|server\s+had\s+an\s+error|high\s+demand|throttl(?:ed|ing)|\bat\s+capacity\b|capacity\s+(?:is\s+)?(?:temporarily\s+)?(?:full|unavailable|exhausted))/i;
@@ -255,6 +258,30 @@ function proseRetryDelayMs(text: string): number | null {
   return durationToMs(`${match[1]}${match[2]}`);
 }
 
+function openCodeRetryCountdownMs(text: string): number | null {
+  const countdown = text.match(
+    /\bretrying\s+in\s+((?:\d+(?:\.\d+)?\s*(?:h|hours?|m|mins?|minutes?|s|secs?|seconds?)\s*){1,4})/i,
+  )?.[1];
+  if (!countdown) return null;
+
+  let totalMs = 0;
+  let matchedChars = 0;
+  for (const match of countdown.matchAll(
+    /(\d+(?:\.\d+)?)\s*(h|hours?|m|mins?|minutes?|s|secs?|seconds?)/gi,
+  )) {
+    const [token, amount, unit] = match;
+    const durationMs = durationToMs(`${amount}${unit}`);
+    if (durationMs === null) return null;
+    totalMs += durationMs;
+    matchedChars += token.length;
+  }
+
+  const compactCountdown = countdown.replace(/\s+/g, "");
+  return totalMs > 0 && matchedChars > 0 && compactCountdown.length >= matchedChars
+    ? totalMs
+    : null;
+}
+
 function resolveRetryNotBefore(
   facts: EvidenceFacts,
   evidenceText: string,
@@ -305,6 +332,11 @@ function resolveRetryNotBefore(
     if (parsed) return parsed;
   }
 
+  const openCodeCountdownMs = openCodeRetryCountdownMs(evidenceText);
+  if (openCodeCountdownMs !== null) {
+    return new Date(now.getTime() + openCodeCountdownMs).toISOString();
+  }
+
   const proseDelayMs = proseRetryDelayMs(evidenceText);
   return proseDelayMs !== null
     ? new Date(now.getTime() + proseDelayMs).toISOString()
@@ -329,8 +361,13 @@ export function classifyOpenCodeProviderFailure(
   const evidenceText = [...facts.text, ...facts.codes].join("\n");
   if (!evidenceText && facts.statusCodes.length === 0) return null;
 
-  // Deterministic failures must never enter provider retry recovery.
-  if (DETERMINISTIC_FAILURE_RE.test(evidenceText)) {
+  // Deterministic failures and account/billing blocks must never enter the
+  // wait-and-retry quota lane. provider_quota means "expected to recover with
+  // time", which is different from requiring a purchase or billing repair.
+  if (
+    DETERMINISTIC_FAILURE_RE.test(evidenceText) ||
+    NON_RETRYABLE_BILLING_RE.test(evidenceText)
+  ) {
     return null;
   }
 
