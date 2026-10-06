@@ -61,6 +61,10 @@ describe("classifyOpenCodeProviderFailure", () => {
       errorFamily: "provider_quota",
       retryNotBefore: null,
     });
+    expect(classify({ message: "Quota exceeded for this account." })).toEqual({
+      errorFamily: "provider_quota",
+      retryNotBefore: null,
+    });
   });
 
   it("treats a plain HTTP 429 as transient_upstream and honors Retry-After", () => {
@@ -103,6 +107,7 @@ describe("classifyOpenCodeProviderFailure", () => {
     { statusCode: 529, message: "Provider overloaded" },
     { code: "overloaded_error", message: "High demand, try again later" },
     { statusCode: 429, message: "Model is temporarily at capacity" },
+    { message: "The server had an error while processing your request." },
   ])("classifies temporary provider pressure as transient_upstream", (payload) => {
     expect(classify(payload)).toMatchObject({
       errorFamily: "transient_upstream",

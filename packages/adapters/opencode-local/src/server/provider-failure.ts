@@ -26,10 +26,10 @@ type EvidenceFacts = {
 };
 
 const HARD_QUOTA_RE =
-  /(?:insufficient[_\s-]?quota|billing(?:\s+hard)?\s+limit|out\s+of\s+(?:credits?|quota)|credits?\s+(?:exhausted|depleted)|exceeded\s+your\s+current\s+quota|(?:usage|session|weekly|monthly|daily)\s+(?:limit|cap)\s+(?:reached|exceeded|exhausted)|you(?:'|’)ve\s+hit\s+your\s+(?:(?:usage|session|weekly|monthly|daily)\s+)?(?:limit|cap)|plan\s+(?:limit|quota)\s+(?:reached|exceeded)|spending\s+limit\s+(?:reached|exceeded))/i;
+  /(?:insufficient[_\s-]?quota|\bquota\s+(?:reached|exceeded|exhausted)\b|billing(?:\s+hard)?\s+limit|out\s+of\s+(?:credits?|quota)|credits?\s+(?:exhausted|depleted)|exceeded\s+your\s+current\s+quota|(?:usage|session|weekly|monthly|daily)\s+(?:limit|cap)\s+(?:reached|exceeded|exhausted)|you(?:'|’)ve\s+hit\s+your\s+(?:(?:usage|session|weekly|monthly|daily)\s+)?(?:limit|cap)|plan\s+(?:limit|quota)\s+(?:reached|exceeded)|spending\s+limit\s+(?:reached|exceeded))/i;
 
 const TRANSIENT_TEXT_RE =
-  /(?:rate[-_\s]?limit(?:ed|ing)?|too\s+many\s+requests|resource[_\s-]?exhausted|server\s+overloaded|overloaded_error|temporarily\s+unavailable|service\s+unavailable|bad\s+gateway|gateway\s+time-?out|internal\s+server\s+error|high\s+demand|throttl(?:ed|ing)|\bat\s+capacity\b|capacity\s+(?:is\s+)?(?:temporarily\s+)?(?:full|unavailable|exhausted))/i;
+  /(?:rate[-_\s]?limit(?:ed|ing)?|too\s+many\s+requests|resource[_\s-]?exhausted|server\s+overloaded|overloaded_error|temporarily\s+unavailable|service\s+unavailable|bad\s+gateway|gateway\s+time-?out|internal\s+server\s+error|server\s+had\s+an\s+error|high\s+demand|throttl(?:ed|ing)|\bat\s+capacity\b|capacity\s+(?:is\s+)?(?:temporarily\s+)?(?:full|unavailable|exhausted))/i;
 
 const DETERMINISTIC_FAILURE_RE =
   /(?:invalid[_\s-]+(?:api[_\s-]+)?key|missing[_\s-]+(?:api[_\s-]+)?key|authentication[_\s-]+(?:failed|required)|unauthori[sz]ed|forbidden|model[_\s-]?(?:not[_\s-]?found|does\s+not\s+exist|unknown|unsupported)|unknown[_\s-]?model|invalid[_\s-]+tool(?:[_\s-]+(?:definition|schema))?|tool[_\s-]+(?:definition|schema).*(?:invalid|unsupported)|context[_\s-]?(?:length|window)[_\s-]?(?:exceeded|overflow)|maximum[_\s-]+context[_\s-]+length)/i;
