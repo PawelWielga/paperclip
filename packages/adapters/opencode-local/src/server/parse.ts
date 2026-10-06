@@ -1,5 +1,10 @@
 import { asNumber, asString, parseJson, parseObject } from "@paperclipai/adapter-utils/server-utils";
 
+export interface OpenCodeTerminalError {
+  message: string;
+  payload: unknown;
+}
+
 function errorText(value: unknown): string {
   if (typeof value === "string") return value;
   const rec = parseObject(value);
@@ -23,6 +28,7 @@ export function parseOpenCodeJsonl(stdout: string) {
   let sessionId: string | null = null;
   const messages: string[] = [];
   const errors: string[] = [];
+  const terminalErrors: OpenCodeTerminalError[] = [];
   const toolErrors: string[] = [];
   const usage = {
     inputTokens: 0,
@@ -72,8 +78,10 @@ export function parseOpenCodeJsonl(stdout: string) {
     }
 
     if (type === "error") {
-      const text = errorText(event.error ?? event.message).trim();
+      const payload = event.error ?? event.message;
+      const text = errorText(payload).trim();
       if (text) errors.push(text);
+      terminalErrors.push({ message: text, payload });
       continue;
     }
   }
@@ -84,6 +92,7 @@ export function parseOpenCodeJsonl(stdout: string) {
     usage,
     costUsd,
     errorMessage: errors.length > 0 ? errors.join("\n") : null,
+    terminalErrors,
     toolErrors,
   };
 }

@@ -40,6 +40,12 @@ describe("parseOpenCodeJsonl", () => {
     });
     expect(parsed.costUsd).toBeCloseTo(0.0025, 6);
     expect(parsed.errorMessage).toContain("model unavailable");
+    expect(parsed.terminalErrors).toEqual([
+      {
+        message: "model unavailable",
+        payload: { message: "model unavailable" },
+      },
+    ]);
     expect(parsed.toolErrors).toEqual([]);
   });
 

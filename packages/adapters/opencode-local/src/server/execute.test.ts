@@ -82,6 +82,215 @@ describe("OpenCode local skill injection", () => {
     expect(prompt).not.toContain("Create child issues");
   });
 
+  it("emits the existing recovery contract for a terminal provider quota error", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-provider-quota");
+    const longQuotaMessage = `You've hit your usage limit for GPT-5. ${"diagnostic ".repeat(600)}`;
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(
+      probeResult({
+        stdout: JSON.stringify({
+          type: "error",
+          sessionID: "quota-session",
+          error: {
+            name: "AI_APICallError",
+            statusCode: 429,
+            message: longQuotaMessage,
+            data: { resetAt: "2030-04-22T21:30:00.000Z" },
+          },
+        }),
+      }),
+    );
+
+    const result = await execute({
+      runId: "run-provider-quota",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "OpenCode",
+        adapterType: "opencode_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "openai/gpt-5",
+        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
+      },
+      context: createPromptContextFixture(),
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("provider_quota");
+    expect(result.errorFamily).toBe("provider_quota");
+    expect(result.retryNotBefore).toBe("2030-04-22T21:30:00.000Z");
+    expect(result.sessionId).toBe("quota-session");
+    expect(result.errorMessage).toHaveLength(4_000);
+    expect(result.errorMessage).toMatch(/^You've hit your usage limit for GPT-5\./);
+    expect(result.errorMessage).toMatch(/…$/);
+  });
+
+  it("does not reclassify successful output that only mentions quota or rate limits", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-quota-mention");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(
+      probeResult({
+        stdout: JSON.stringify({
+          type: "text",
+          sessionID: "success-session",
+          part: {
+            text: "I inspected an HTTP 429 rate-limit error and the weekly quota message; the task is complete.",
+          },
+        }),
+      }),
+    );
+
+    const result = await execute({
+      runId: "run-successful-quota-mention",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "OpenCode",
+        adapterType: "opencode_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "openai/gpt-5",
+        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
+      },
+      context: createPromptContextFixture(),
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errorCode).toBeNull();
+    expect(result.errorFamily).toBeNull();
+    expect(result.retryNotBefore).toBeNull();
+    expect(result.summary).toContain("HTTP 429 rate-limit error");
+  });
+
+  it("keeps a tool-level 429 out of provider recovery", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-tool-429");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(
+      probeResult({
+        exitCode: 1,
+        stdout: JSON.stringify({
+          type: "tool_use",
+          sessionID: "tool-session",
+          part: {
+            state: {
+              status: "error",
+              error: "Tool request failed: HTTP 429 Too Many Requests",
+            },
+          },
+        }),
+        stderr: "Tool request failed: HTTP 429 Too Many Requests",
+      }),
+    );
+
+    const result = await execute({
+      runId: "run-tool-429",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "OpenCode",
+        adapterType: "opencode_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "openai/gpt-5",
+        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
+      },
+      context: createPromptContextFixture(),
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorFamily).toBeNull();
+    expect(result.retryNotBefore).toBeNull();
+  });
+
+  it("turns a swallowed clean-exit provider failure into transient_upstream", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-transient-clean-exit");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(
+      probeResult({
+        exitCode: 0,
+        stdout: "",
+        stderr: [
+          "AI_APICallError: Resource has been exhausted (e.g. check quota).",
+          JSON.stringify({
+            error: {
+              code: 429,
+              status: "RESOURCE_EXHAUSTED",
+              message: "Resource has been exhausted (e.g. check quota).",
+              details: [{ retryDelay: "27s" }],
+            },
+          }),
+        ].join("\n"),
+      }),
+    );
+
+    const result = await execute({
+      runId: "run-transient-clean-exit",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "OpenCode",
+        adapterType: "opencode_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "openai/gpt-5",
+        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
+      },
+      context: createPromptContextFixture(),
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBeNull();
+    expect(result.errorFamily).toBe("transient_upstream");
+    expect(result.retryNotBefore).toBeTruthy();
+    expect(new Date(result.retryNotBefore ?? 0).getTime()).toBeGreaterThan(Date.now());
+    expect(result.errorMessage).toContain("AI_APICallError");
+  });
+
   it("delivers assignment context on an ordinary task turn and rebuilds it after resume fallback", async () => {
     const commandPath = path.join(configHome, "fake-opencode-context");
     await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
