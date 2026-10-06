@@ -584,6 +584,203 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(enqueueWakeup).not.toHaveBeenCalled();
   });
 
+  async function seedProviderQuotaRecoveryFixture() {
+    const fixture = await seedCompany();
+    const sourceRunId = randomUUID();
+    const retryNotBefore = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const startedAt = new Date(Date.now() - 60_000);
+    await db.insert(heartbeatRuns).values({
+      id: sourceRunId,
+      companyId: fixture.companyId,
+      agentId: fixture.coderId,
+      invocationSource: "manual",
+      status: "failed",
+      error: "You've hit your usage limit.",
+      errorCode: "provider_quota",
+      resultJson: {
+        errorFamily: "provider_quota",
+        retryNotBefore,
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      },
+      contextSnapshot: { issueId: fixture.sourceIssueId },
+      startedAt,
+      finishedAt: new Date(),
+    });
+    const latestRun = {
+      id: sourceRunId,
+      agentId: fixture.coderId,
+      status: "failed",
+      error: "You've hit your usage limit.",
+      errorCode: "provider_quota",
+      resultJson: {
+        errorFamily: "provider_quota",
+        retryNotBefore,
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      },
+      contextSnapshot: { issueId: fixture.sourceIssueId },
+      livenessState: "needs_followup",
+      startedAt,
+      createdAt: startedAt,
+    } as const;
+    return { ...fixture, sourceRunId, latestRun };
+  }
+
+  it("does not let an unrelated scheduled retry suppress provider quota recovery", async () => {
+    const {
+      companyId,
+      coderId,
+      sourceIssue,
+      sourceIssueId,
+      sourceRunId,
+      latestRun,
+    } = await seedProviderQuotaRecoveryFixture();
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(),
+      companyId,
+      agentId: coderId,
+      invocationSource: "automation",
+      status: "scheduled_retry",
+      retryOfRunId: sourceRunId,
+      scheduledRetryAt: new Date(Date.now() + 5 * 60 * 1000),
+      scheduledRetryAttempt: 1,
+      scheduledRetryReason: "transient_failure",
+      contextSnapshot: { issueId: sourceIssueId, retryReason: "transient_failure" },
+    });
+
+    await recoveryService(db, { enqueueWakeup: vi.fn(async () => null) })
+      .escalateStrandedAssignedIssue({
+        issue: sourceIssue,
+        previousStatus: "in_progress",
+        latestRun,
+        recoveryCause: "provider_quota",
+      });
+
+    const retries = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, coderId),
+          eq(heartbeatRuns.status, "scheduled_retry"),
+        ),
+      );
+    expect(retries).toHaveLength(2);
+    expect(retries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ scheduledRetryReason: "transient_failure" }),
+        expect.objectContaining({
+          scheduledRetryReason: "provider_quota_recovery",
+          retryOfRunId: sourceRunId,
+        }),
+      ]),
+    );
+  });
+
+  it("reuses the same logical provider quota recovery retry on repeated recovery", async () => {
+    const { companyId, coderId, sourceIssue, sourceRunId, latestRun } =
+      await seedProviderQuotaRecoveryFixture();
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(async () => null) });
+    const input = {
+      issue: sourceIssue,
+      previousStatus: "in_progress" as const,
+      latestRun,
+      recoveryCause: "provider_quota" as const,
+    };
+
+    await recovery.escalateStrandedAssignedIssue(input);
+    await recovery.escalateStrandedAssignedIssue(input);
+
+    const quotaRetries = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, coderId),
+          eq(heartbeatRuns.retryOfRunId, sourceRunId),
+          eq(heartbeatRuns.scheduledRetryReason, "provider_quota_recovery"),
+        ),
+      );
+    expect(quotaRetries).toHaveLength(1);
+
+    const quotaWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.agentId, coderId),
+          eq(agentWakeupRequests.reason, "provider_quota_recovery"),
+        ),
+      );
+    expect(quotaWakeups).toHaveLength(1);
+
+    const [action] = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, sourceIssue.id));
+    expect(action?.monitorPolicy).toMatchObject({
+      type: "wait_recovery",
+      retryAgentId: coderId,
+      scheduledRunId: quotaRetries[0]!.id,
+    });
+  });
+
+  it("creates one provider quota recovery retry under concurrent recovery attempts", async () => {
+    const { companyId, coderId, sourceIssue, sourceRunId, latestRun } =
+      await seedProviderQuotaRecoveryFixture();
+    const input = {
+      issue: sourceIssue,
+      previousStatus: "in_progress" as const,
+      latestRun,
+      recoveryCause: "provider_quota" as const,
+    };
+
+    await Promise.all([
+      recoveryService(db, { enqueueWakeup: vi.fn(async () => null) })
+        .escalateStrandedAssignedIssue(input),
+      recoveryService(db, { enqueueWakeup: vi.fn(async () => null) })
+        .escalateStrandedAssignedIssue(input),
+    ]);
+
+    const quotaRetries = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, coderId),
+          eq(heartbeatRuns.retryOfRunId, sourceRunId),
+          eq(heartbeatRuns.scheduledRetryReason, "provider_quota_recovery"),
+        ),
+      );
+    expect(quotaRetries).toHaveLength(1);
+
+    const quotaWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.agentId, coderId),
+          eq(agentWakeupRequests.reason, "provider_quota_recovery"),
+        ),
+      );
+    expect(quotaWakeups).toHaveLength(1);
+    expect(quotaWakeups[0]?.runId).toBe(quotaRetries[0]?.id);
+
+    const [action] = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, sourceIssue.id));
+    expect(action?.monitorPolicy).toMatchObject({
+      type: "wait_recovery",
+      retryAgentId: coderId,
+      scheduledRunId: quotaRetries[0]!.id,
+    });
+  });
+
   // Model the production payload: `requestedRef` keeps the operator spelling,
   // and the fingerprint carries the canonical remote ref. Two equivalent
   // spellings of one remote branch share `identityRef`, so they share one
