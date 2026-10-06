@@ -239,6 +239,46 @@ describe("classifyOpenCodeProviderFailure", () => {
     });
   });
 
+  it.each([
+    ["30 minutes", "2030-04-22T20:30:00.000Z"],
+    ["30 ms", "2030-04-22T20:00:00.030Z"],
+  ])("parses unit-bearing textual Retry-After values without treating them as seconds", (retryAfter, expected) => {
+    expect(
+      classifyOpenCodeProviderFailure(
+        {
+          terminalErrors: [],
+          stderr: `AI_APICallError: Too Many Requests\nstatusCode: 429\nretry-after: ${retryAfter}`,
+          errorMessage: null,
+          exitCode: 0,
+          hasOutput: false,
+        },
+        NOW,
+      ),
+    ).toEqual({
+      errorFamily: "transient_upstream",
+      retryNotBefore: expected,
+    });
+  });
+
+  it("does not treat an unsupported Retry-After unit as bare seconds", () => {
+    expect(
+      classifyOpenCodeProviderFailure(
+        {
+          terminalErrors: [],
+          stderr:
+            "AI_APICallError: Too Many Requests\nstatusCode: 429\nretry-after: 30 fortnights",
+          errorMessage: null,
+          exitCode: 0,
+          hasOutput: false,
+        },
+        NOW,
+      ),
+    ).toEqual({
+      errorFamily: "transient_upstream",
+      retryNotBefore: null,
+    });
+  });
+
   it("does not backtrack a malformed Retry-After value into a shorter numeric prefix", () => {
     expect(
       classifyOpenCodeProviderFailure(
