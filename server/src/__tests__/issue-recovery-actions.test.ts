@@ -625,6 +625,39 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     return { ...fixture, sourceRunId, latestRun };
   }
 
+  it("keeps the agent idle while free-tier provider quota recovery is waiting", async () => {
+    const { companyId, coderId, sourceIssue, sourceRunId, latestRun } =
+      await seedProviderQuotaRecoveryFixture();
+
+    await recoveryService(db, { enqueueWakeup: vi.fn(async () => null) })
+      .escalateStrandedAssignedIssue({
+        issue: sourceIssue,
+        previousStatus: "in_progress",
+        latestRun,
+        recoveryCause: "provider_quota",
+      });
+
+    const [agent] = await db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), eq(agents.id, coderId)));
+    expect(agent?.status).toBe("idle");
+
+    const quotaRetries = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, coderId),
+          eq(heartbeatRuns.retryOfRunId, sourceRunId),
+          eq(heartbeatRuns.scheduledRetryReason, "provider_quota_recovery"),
+        ),
+      );
+    expect(quotaRetries).toHaveLength(1);
+    expect(quotaRetries[0]).toMatchObject({ status: "scheduled_retry" });
+  });
+
   it("does not let an unrelated scheduled retry suppress provider quota recovery", async () => {
     const {
       companyId,
