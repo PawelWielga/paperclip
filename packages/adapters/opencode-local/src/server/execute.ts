@@ -66,6 +66,12 @@ import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { resolveOpenCodeSkillsHome } from "./skills.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const PROVIDER_FAILURE_ERROR_MESSAGE_MAX_CHARS = 4_000;
+
+function boundProviderFailureErrorMessage(text: string): string {
+  if (text.length <= PROVIDER_FAILURE_ERROR_MESSAGE_MAX_CHARS) return text;
+  return `${text.slice(0, PROVIDER_FAILURE_ERROR_MESSAGE_MAX_CHARS - 1)}…`;
+}
 
 function firstNonEmptyLine(text: string): string {
   return (
@@ -727,6 +733,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         parsedError ||
         stderrLine ||
         `OpenCode exited with code ${effectiveExitCode ?? -1}`;
+      const surfacedErrorMessage = providerFailure
+        ? boundProviderFailureErrorMessage(fallbackErrorMessage)
+        : fallbackErrorMessage;
       const normalizedErrorCode =
         attempt.proc.errorCode ??
         (providerFailure?.errorFamily === "provider_quota" ? "provider_quota" : null);
@@ -735,7 +744,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: effectiveExitCode,
         signal: attempt.proc.signal,
         timedOut: false,
-        errorMessage: (effectiveExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
+        errorMessage: (effectiveExitCode ?? 0) === 0 ? null : surfacedErrorMessage,
         // Forward transport-level run-disposition errors first. Provider quota
         // gets the existing stable code so stranded-work recovery can identify it;
         // transient upstream failures rely on errorFamily and retain the generic

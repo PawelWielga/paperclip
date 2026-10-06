@@ -84,6 +84,7 @@ describe("OpenCode local skill injection", () => {
 
   it("emits the existing recovery contract for a terminal provider quota error", async () => {
     const commandPath = path.join(configHome, "fake-opencode-provider-quota");
+    const longQuotaMessage = `You've hit your usage limit for GPT-5. ${"diagnostic ".repeat(600)}`;
     await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     runProcessMock.mockReset();
     runProcessMock.mockResolvedValue(
@@ -94,7 +95,7 @@ describe("OpenCode local skill injection", () => {
           error: {
             name: "AI_APICallError",
             statusCode: 429,
-            message: "You've hit your usage limit for GPT-5.",
+            message: longQuotaMessage,
             data: { resetAt: "2030-04-22T21:30:00.000Z" },
           },
         }),
@@ -131,6 +132,57 @@ describe("OpenCode local skill injection", () => {
     expect(result.errorFamily).toBe("provider_quota");
     expect(result.retryNotBefore).toBe("2030-04-22T21:30:00.000Z");
     expect(result.sessionId).toBe("quota-session");
+    expect(result.errorMessage).toHaveLength(4_000);
+    expect(result.errorMessage).toMatch(/^You've hit your usage limit for GPT-5\./);
+    expect(result.errorMessage).toMatch(/…$/);
+  });
+
+  it("does not reclassify successful output that only mentions quota or rate limits", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-quota-mention");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(
+      probeResult({
+        stdout: JSON.stringify({
+          type: "text",
+          sessionID: "success-session",
+          part: {
+            text: "I inspected an HTTP 429 rate-limit error and the weekly quota message; the task is complete.",
+          },
+        }),
+      }),
+    );
+
+    const result = await execute({
+      runId: "run-successful-quota-mention",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "OpenCode",
+        adapterType: "opencode_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "openai/gpt-5",
+        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
+      },
+      context: createPromptContextFixture(),
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.errorCode).toBeNull();
+    expect(result.errorFamily).toBeNull();
+    expect(result.retryNotBefore).toBeNull();
+    expect(result.summary).toContain("HTTP 429 rate-limit error");
   });
 
   it("keeps a tool-level 429 out of provider recovery", async () => {
