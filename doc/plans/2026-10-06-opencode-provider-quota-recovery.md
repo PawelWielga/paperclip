@@ -3,6 +3,22 @@
 Status: implemented in PR #13 on `develop`
 Goal: normalize recoverable OpenCode provider failures into Paperclip's existing recovery contract and make provider quota retry creation idempotent.
 
+## 0. Product motivation
+
+This fork needs OpenCode free-tier exhaustion to behave like a temporary availability constraint, not like a broken agent.
+
+The concrete user-facing requirement is:
+
+- when an OpenCode free model reports messages such as `Free usage exceeded` or `FreeUsageLimitError`, the current run may remain failed for an accurate execution history;
+- the agent itself must remain healthy and display as `idle`, not `failed`;
+- the assigned issue must remain recoverable rather than being treated as abandoned work;
+- Paperclip should create one durable `provider_quota_recovery` retry and resume the same agent when the free quota becomes usable again;
+- when OpenCode exposes a countdown such as `retrying in 8h 13m`, that provider timing should be honored rather than repeatedly probing the exhausted free tier.
+
+This distinction is intentional: a failed model invocation is not the same thing as a failed agent. The agent is still correctly configured and capable of work; the selected free provider is temporarily unavailable because its usage allowance has been consumed.
+
+The same retry lane must not be used for conditions that require human/account intervention, such as exhausted paid credits, a billing hard limit, a spending limit, or a payment problem. Those conditions are not expected to heal merely by waiting.
+
 ## 1. Decision
 
 Paperclip already has the primitives needed to represent provider waits:
@@ -61,16 +77,27 @@ The adapter does not emit a legacy `providerQuotaRetryNotBefore` compatibility a
 
 ### Provider quota
 
-Strong usage, session, billing, or quota exhaustion evidence is classified as `provider_quota`.
+`provider_quota` is reserved for usage limits that are expected to become usable again with time.
 
-Examples include:
+Primary examples for this fork are:
 
-- quota reached or exceeded
+- OpenCode `FreeUsageLimitError`
+- `Free usage exceeded`
 - usage/session/weekly/monthly/daily limit reached
-- credits exhausted
-- billing or spending limit reached
+- quota reached or exceeded when the evidence describes a usage allowance
+- provider messages with a future reset or retry countdown
 
 A generic HTTP 429 alone is not enough to call the failure a hard quota exhaustion.
+
+Account conditions that require intervention are deliberately excluded from this wait lane, including:
+
+- exhausted paid credits
+- billing hard limits
+- spending limits
+- payment-required failures
+- `insufficient_quota` accompanied by billing/plan remediation text
+
+Those failures should remain visible as non-automatic recovery conditions instead of being retried every provider-quota backoff interval.
 
 ### Transient upstream pressure
 
@@ -111,6 +138,7 @@ Supported sources include:
 - HTTP-date `Retry-After`
 - recognized unit-bearing retry values such as seconds, minutes, hours, and milliseconds
 - recognized prose such as `try again after 30 minutes`
+- OpenCode free-tier countdowns such as `retrying in 8h 13m`
 
 Unit-bearing `Retry-After` values are parsed as durations before bare numeric-seconds matching. Unsupported units are not truncated to a numeric prefix.
 
@@ -152,7 +180,9 @@ The source failed run remains inspectable while the current execution path can w
 
 The implementation includes focused coverage for:
 
-- hard quota exhaustion with and without a reset time
+- OpenCode free-tier exhaustion (`FreeUsageLimitError` / `Free usage exceeded`) with and without a countdown
+- hard usage quota exhaustion with and without a reset time
+- billing/credits/spending blocks as negative controls
 - generic HTTP 429 handling
 - `RESOURCE_EXHAUSTED` with retry metadata
 - temporary 5xx/capacity failures
@@ -186,7 +216,7 @@ Those can reuse the same normalized provider-failure signals later if needed.
 
 Overly broad text matching could delay work that should fail immediately.
 
-Mitigation: prefer structured evidence, use conservative patterns, keep deterministic failures excluded, and maintain negative controls.
+Mitigation: prefer structured evidence, explicitly recognize the OpenCode free-tier signatures we care about, keep deterministic and billing/account-remediation failures excluded, and maintain negative controls.
 
 ### Incorrect retry timing
 
