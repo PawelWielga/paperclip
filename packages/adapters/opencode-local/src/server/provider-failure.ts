@@ -46,8 +46,10 @@ const TEXT_RETRY_DELAY_RE =
   /retry[-_\s]?delay["'`\s:=]+["'`]?((?:\d+(?:\.\d+)?)\s*(?:ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hours?))\b/i;
 const TEXT_RETRY_AFTER_DATE_RE =
   /retry[-_\s]?after["'`\s:=]+["'`]?([A-Z][a-z]{2},\s?[^"'\`\n]+?(?:GMT|UTC))/;
+const TEXT_RETRY_AFTER_DURATION_RE =
+  /retry[-_\s]?after["'`\s:=]+["'`]?((?:\d+(?:\.\d+)?)\s*(?:ms|milliseconds?|s|secs?|seconds?|m|mins?|minutes?|h|hours?))\b/i;
 const TEXT_RETRY_AFTER_SECONDS_RE =
-  /retry[-_\s]?after["'`\s:=]+["'`]?((?:\d+(?:\.\d+)?))(?![\d.])(?!\s*(?:gmt|utc)\b)/i;
+  /retry[-_\s]?after["'`\s:=]+["'`]?((?:\d+(?:\.\d+)?))(?![\d.])(?![ \t]*[A-Za-z])/i;
 const CLEAN_EXIT_PROVIDER_WRAPPER_RE = /\bAI_APICallError\b/i;
 
 const ABSOLUTE_RETRY_KEYS = new Set([
@@ -271,6 +273,12 @@ function resolveRetryNotBefore(
   const textRetryDelay = evidenceText.match(TEXT_RETRY_DELAY_RE)?.[1];
   if (textRetryDelay) {
     const delayMs = durationToMs(textRetryDelay);
+    if (delayMs !== null) return new Date(now.getTime() + delayMs).toISOString();
+  }
+
+  const textRetryAfterDuration = evidenceText.match(TEXT_RETRY_AFTER_DURATION_RE)?.[1];
+  if (textRetryAfterDuration) {
+    const delayMs = durationToMs(textRetryAfterDuration);
     if (delayMs !== null) return new Date(now.getTime() + delayMs).toISOString();
   }
 
