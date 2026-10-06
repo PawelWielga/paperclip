@@ -2609,25 +2609,61 @@ export function recoveryService(
     actionId: string;
     agentId: string;
   }) {
-    const existing = await db
-      .select()
-      .from(heartbeatRuns)
-      .where(
-        and(
-          eq(heartbeatRuns.companyId, input.issue.companyId),
-          eq(heartbeatRuns.agentId, input.agentId),
-          eq(heartbeatRuns.status, "scheduled_retry"),
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${input.issue.id}`,
-        ),
-      )
-      .orderBy(desc(heartbeatRuns.scheduledRetryAt))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (existing) return existing;
-
     const now = new Date();
     const retryAt = readProviderQuotaRetryAt(input.latestRun, now);
+    const sourceRunId = input.latestRun?.id ?? null;
+    const retryReason = "provider_quota_recovery";
     return db.transaction(async (tx) => {
+      // Serialize the decision for this issue, then lock the source run in
+      // the same issue -> run order used by heartbeat retry scheduling.
+      await tx.execute(
+        sql`select id from issues where company_id = ${input.issue.companyId} and id = ${input.issue.id} for update`,
+      );
+      if (sourceRunId) {
+        await tx.execute(
+          sql`select id from heartbeat_runs where company_id = ${input.issue.companyId} and id = ${sourceRunId} for update`,
+        );
+      }
+
+      const existing = await tx
+        .select()
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, input.issue.companyId),
+            eq(heartbeatRuns.agentId, input.agentId),
+            eq(heartbeatRuns.scheduledRetryReason, retryReason),
+            inArray(heartbeatRuns.status, ["scheduled_retry", "queued", "running"]),
+            sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${input.issue.id}`,
+            sourceRunId
+              ? eq(heartbeatRuns.retryOfRunId, sourceRunId)
+              : and(
+                  isNull(heartbeatRuns.retryOfRunId),
+                  sql`${heartbeatRuns.contextSnapshot} ->> 'recoveryActionId' = ${input.actionId}`,
+                ),
+          ),
+        )
+        .orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+
+      if (existing) {
+        const existingRetryAt = existing.scheduledRetryAt ?? retryAt;
+        await tx
+          .update(issueRecoveryActions)
+          .set({
+            monitorPolicy: {
+              type: "wait_recovery",
+              retryAgentId: input.agentId,
+              scheduledRunId: existing.id,
+              retryAt: existingRetryAt.toISOString(),
+            },
+            timeoutAt: existingRetryAt,
+            updatedAt: now,
+          })
+          .where(eq(issueRecoveryActions.id, input.actionId));
+        return existing;
+      }
       const wakeup = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -2635,12 +2671,13 @@ export function recoveryService(
           agentId: input.agentId,
           source: "automation",
           triggerDetail: "system",
-          reason: "provider_quota_recovery",
+          reason: retryReason,
           payload: withRecoveryContext(
             {
               issueId: input.issue.id,
-              retryOfRunId: input.latestRun?.id ?? null,
-              retryReason: "provider_quota_recovery",
+              recoveryActionId: input.actionId,
+              retryOfRunId: sourceRunId,
+              retryReason,
               providerQuotaRetryNotBefore: retryAt.toISOString(),
             },
             "normal_model",
@@ -2648,7 +2685,7 @@ export function recoveryService(
           status: "queued",
           requestedByActorType: "system",
           requestedByActorId: null,
-          idempotencyKey: `provider_quota_recovery:${input.issue.id}:${retryAt.toISOString()}`,
+          idempotencyKey: `provider_quota_recovery:${input.issue.id}:${sourceRunId ?? input.actionId}`,
           updatedAt: now,
         })
         .returning()
@@ -2662,16 +2699,17 @@ export function recoveryService(
           triggerDetail: "system",
           status: "scheduled_retry",
           wakeupRequestId: wakeup.id,
-          retryOfRunId: input.latestRun?.id ?? null,
+          retryOfRunId: sourceRunId,
           scheduledRetryAt: retryAt,
           scheduledRetryAttempt: 1,
-          scheduledRetryReason: "provider_quota_recovery",
+          scheduledRetryReason: retryReason,
           contextSnapshot: withRecoveryContext(
             {
               issueId: input.issue.id,
               taskId: input.issue.id,
-              wakeReason: "provider_quota_recovery",
-              retryReason: "provider_quota_recovery",
+              recoveryActionId: input.actionId,
+              wakeReason: retryReason,
+              retryReason,
               providerQuotaRetryNotBefore: retryAt.toISOString(),
             },
             "normal_model",
