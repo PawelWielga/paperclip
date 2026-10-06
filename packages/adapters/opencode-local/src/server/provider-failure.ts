@@ -239,6 +239,11 @@ function retryAfterToIso(value: unknown, now: Date): string | null {
       : null;
   }
 
+  const durationMs = durationToMs(trimmed);
+  if (durationMs !== null) {
+    return new Date(now.getTime() + durationMs).toISOString();
+  }
+
   return futureDateIso(trimmed, now);
 }
 

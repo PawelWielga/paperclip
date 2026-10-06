@@ -81,6 +81,24 @@ describe("classifyOpenCodeProviderFailure", () => {
     });
   });
 
+  it.each([
+    ["30 minutes", "2030-04-22T20:30:00.000Z"],
+    ["30 ms", "2030-04-22T20:00:00.030Z"],
+    ["30 fortnights", null],
+  ])("parses structured unit-bearing Retry-After value %s", (retryAfter, expected) => {
+    expect(
+      classify({
+        name: "AI_APICallError",
+        statusCode: 429,
+        message: "Too Many Requests",
+        responseHeaders: { "retry-after": retryAfter },
+      }),
+    ).toEqual({
+      errorFamily: "transient_upstream",
+      retryNotBefore: expected,
+    });
+  });
+
   it("treats RESOURCE_EXHAUSTED with RetryInfo as short-lived transient pressure", () => {
     expect(
       classify({
