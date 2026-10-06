@@ -137,6 +137,60 @@ describe("OpenCode local skill injection", () => {
     expect(result.errorMessage).toMatch(/…$/);
   });
 
+  it("maps the OpenCode free-tier usage limit to provider_quota instead of an agent failure condition", async () => {
+    const commandPath = path.join(configHome, "fake-opencode-free-tier-limit");
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    runProcessMock.mockReset();
+    runProcessMock.mockResolvedValue(
+      probeResult({
+        stdout: JSON.stringify({
+          type: "error",
+          sessionID: "free-tier-session",
+          error: {
+            name: "FreeUsageLimitError",
+            statusCode: 429,
+            message: "Free usage exceeded, subscribe to Go [retrying in 8h 13m attempt #1]",
+          },
+        }),
+      }),
+    );
+
+    const startedAt = Date.now();
+    const result = await execute({
+      runId: "run-free-tier-quota",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "OpenCode",
+        adapterType: "opencode_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: commandPath,
+        cwd: configHome,
+        model: "opencode/big-pickle",
+        env: { OPENCODE_ALLOW_ALL_MODELS: "1" },
+      },
+      context: createPromptContextFixture(),
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("provider_quota");
+    expect(result.errorFamily).toBe("provider_quota");
+    expect(result.sessionId).toBe("free-tier-session");
+    expect(result.retryNotBefore).not.toBeNull();
+    const retryDelayMs = Date.parse(result.retryNotBefore!) - startedAt;
+    expect(retryDelayMs).toBeGreaterThanOrEqual(8 * 60 * 60 * 1000 + 12 * 60 * 1000);
+    expect(retryDelayMs).toBeLessThanOrEqual(8 * 60 * 60 * 1000 + 14 * 60 * 1000);
+  });
+
   it("does not reclassify successful output that only mentions quota or rate limits", async () => {
     const commandPath = path.join(configHome, "fake-opencode-quota-mention");
     await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
