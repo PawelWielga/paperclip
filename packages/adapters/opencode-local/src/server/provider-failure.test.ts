@@ -38,6 +38,32 @@ describe("classifyOpenCodeProviderFailure", () => {
     });
   });
 
+  it("classifies the OpenCode free-tier limit and honors its retry countdown", () => {
+    expect(
+      classify({
+        name: "FreeUsageLimitError",
+        statusCode: 429,
+        message: "Free usage exceeded, subscribe to Go [retrying in 8h 13m attempt #1]",
+      }),
+    ).toEqual({
+      errorFamily: "provider_quota",
+      retryNotBefore: "2030-04-23T04:13:00.000Z",
+    });
+  });
+
+  it("classifies the OpenCode free-tier limit even when no reset hint is available", () => {
+    expect(
+      classify({
+        name: "FreeUsageLimitError",
+        statusCode: 429,
+        message: "Free usage exceeded, add credits https://opencode.ai/go",
+      }),
+    ).toEqual({
+      errorFamily: "provider_quota",
+      retryNotBefore: null,
+    });
+  });
+
   it("parses an absolute reset timestamp from quota prose", () => {
     expect(
       classify({
@@ -142,6 +168,19 @@ describe("classifyOpenCodeProviderFailure", () => {
       errorFamily: "provider_quota",
       retryNotBefore: "2030-04-22T20:30:00.000Z",
     });
+  });
+
+  it.each([
+    {
+      code: "insufficient_quota",
+      statusCode: 429,
+      message: "You exceeded your current quota, please check your plan and billing details.",
+    },
+    { statusCode: 402, message: "Credits exhausted. Add funds to continue." },
+    { statusCode: 402, message: "Billing hard limit reached." },
+    { statusCode: 402, message: "Spending limit exceeded." },
+  ])("does not turn billing/account blocks into timed provider quota recovery", (payload) => {
+    expect(classify(payload)).toBeNull();
   });
 
   it.each([
