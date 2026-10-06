@@ -1,6 +1,6 @@
 # OpenCode provider quota recovery
 
-Status: implemented in PR #13 on `develop`  
+Status: implemented in PR #13 on `develop`
 Goal: normalize recoverable OpenCode provider failures into Paperclip's existing recovery contract and make provider quota retry creation idempotent.
 
 ## 1. Decision
