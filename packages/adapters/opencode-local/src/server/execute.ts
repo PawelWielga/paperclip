@@ -53,6 +53,7 @@ import {
   resolveLegacyPaperclipDesiredSkillNames,
 } from "@paperclipai/adapter-utils/server-utils";
 import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl } from "./parse.js";
+import { classifyOpenCodeProviderFailure } from "./provider-failure.js";
 import {
   ensureOpenCodeModelConfiguredAndAvailable,
   isTruthyEnvFlag,
@@ -705,21 +706,43 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
       const rawExitCode = attempt.proc.exitCode;
       const synthesizedExitCode = parsedError && (rawExitCode ?? 0) === 0 ? 1 : rawExitCode;
+      const modelId = model || null;
+      const providerFailure =
+        attempt.proc.errorCode
+          ? null
+          : classifyOpenCodeProviderFailure({
+              terminalErrors: attempt.parsed.terminalErrors,
+              stderr: attempt.proc.stderr,
+              errorMessage: parsedError || null,
+              toolErrors: attempt.parsed.toolErrors,
+              exitCode: synthesizedExitCode,
+              hasOutput: attempt.parsed.summary.trim().length > 0,
+            });
+      // OpenCode may swallow an upstream provider failure and still exit 0.
+      // Once the provider failure is established, make the adapter result a
+      // real failure so heartbeat enters the existing recovery path.
+      const effectiveExitCode =
+        providerFailure && (synthesizedExitCode ?? 0) === 0 ? 1 : synthesizedExitCode;
       const fallbackErrorMessage =
         parsedError ||
         stderrLine ||
-        `OpenCode exited with code ${synthesizedExitCode ?? -1}`;
-      const modelId = model || null;
+        `OpenCode exited with code ${effectiveExitCode ?? -1}`;
+      const normalizedErrorCode =
+        attempt.proc.errorCode ??
+        (providerFailure?.errorFamily === "provider_quota" ? "provider_quota" : null);
 
       return {
-        exitCode: synthesizedExitCode,
+        exitCode: effectiveExitCode,
         signal: attempt.proc.signal,
         timedOut: false,
-        errorMessage: (synthesizedExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
-        // Forward the transport-level error code from the run-disposition seam.
-        // A lost duplex control channel surfaces the typed `duplex_channel_lost`
-        // code; every other result carries no code here.
-        errorCode: attempt.proc.errorCode ?? null,
+        errorMessage: (effectiveExitCode ?? 0) === 0 ? null : fallbackErrorMessage,
+        // Forward transport-level run-disposition errors first. Provider quota
+        // gets the existing stable code so stranded-work recovery can identify it;
+        // transient upstream failures rely on errorFamily and retain the generic
+        // adapter failure code assigned by core.
+        errorCode: normalizedErrorCode,
+        errorFamily: providerFailure?.errorFamily ?? null,
+        retryNotBefore: providerFailure?.retryNotBefore ?? null,
         usage: {
           inputTokens: attempt.parsed.usage.inputTokens,
           outputTokens: attempt.parsed.usage.outputTokens,
