@@ -1,0 +1,107 @@
+name: Manual PR CI
+
+run-name: >-
+  Manual PR CI #${{
+    github.event_name == 'workflow_dispatch'
+      && inputs.pr_number
+      || github.event.issue.number
+  }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to verify
+        required: true
+        type: number
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  resolve:
+    name: Resolve PR merge ref
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.issue.pull_request != null &&
+        github.event.comment.body == '/run-ci' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      merge_sha: ${{ steps.pr.outputs.merge_sha }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+
+    steps:
+      - name: Resolve current PR state
+        id: pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          COMMENT_PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            pr_number="$INPUT_PR_NUMBER"
+          else
+            pr_number="$COMMENT_PR_NUMBER"
+          fi
+
+          if [[ ! "$pr_number" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid PR number: $pr_number" >&2
+            exit 1
+          fi
+
+          pr_json="$(gh api             -H 'Accept: application/vnd.github+json'             -H 'X-GitHub-Api-Version: 2022-11-28'             "/repos/$GITHUB_REPOSITORY/pulls/$pr_number")"
+
+          state="$(jq -r '.state' <<< "$pr_json")"
+          base_repo="$(jq -r '.base.repo.full_name' <<< "$pr_json")"
+          merge_sha="$(jq -r '.merge_commit_sha // empty' <<< "$pr_json")"
+          head_sha="$(jq -r '.head.sha // empty' <<< "$pr_json")"
+          base_sha="$(jq -r '.base.sha // empty' <<< "$pr_json")"
+
+          if [[ "$state" != "open" ]]; then
+            echo "PR #$pr_number is not open." >&2
+            exit 1
+          fi
+
+          if [[ "$base_repo" != "$GITHUB_REPOSITORY" ]]; then
+            echo "PR #$pr_number targets another repository: $base_repo" >&2
+            exit 1
+          fi
+
+          for sha in "$merge_sha" "$head_sha" "$base_sha"; do
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "PR #$pr_number does not currently expose a valid merge/head/base SHA." >&2
+              exit 1
+            fi
+          done
+
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Manual PR CI"
+            echo
+            echo "- PR: #$pr_number"
+            echo "- base: `$base_sha`"
+            echo "- head: `$head_sha`"
+            echo "- merge ref: `$merge_sha`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    name: Verify PR merge tree
+    needs: resolve
+    uses: ./.github/workflows/release-verify.yml
+    with:
+      ref: ${{ needs.resolve.outputs.merge_sha }}
