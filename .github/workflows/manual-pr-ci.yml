@@ -94,9 +94,9 @@ jobs:
             echo "### Manual PR CI"
             echo
             echo "- PR: #$pr_number"
-            echo "- base: `$base_sha`"
-            echo "- head: `$head_sha`"
-            echo "- merge ref: `$merge_sha`"
+            printf -- '- base: `%s`\n' "$base_sha"
+            printf -- '- head: `%s`\n' "$head_sha"
+            printf -- '- merge ref: `%s`\n' "$merge_sha"
           } >> "$GITHUB_STEP_SUMMARY"
 
   verify:
